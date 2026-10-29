@@ -2281,19 +2281,18 @@ local function initEngine()
     
     
     
+     
+     
+     
     local function fireEvent(name, arg)
+        local caps = _G.__LOLCAT_CAP
+        if type(caps) ~= "table" then return false end
         local ev = getRemote(name)
         if not ev then return false end
-        local call
-        if ev.ClassName == "RemoteFunction" then
-            call = function() return ev:InvokeServer(arg) end
-        elseif arg ~= nil then
-            call = function() return ev:FireServer(arg) end
-        else
-            call = function() return ev:FireServer() end
-        end
-        local ok = pcall(call)
-        return ok
+        local fn
+        if ev.ClassName == "RemoteFunction" then fn = caps.invoke else fn = caps.send end
+        if type(fn) ~= "function" then return false end
+        return pcall(fn, ev, arg)
     end
 
     
@@ -2308,64 +2307,6 @@ local function initEngine()
     local sprinklerBusy = false
     local lastSprinklerField = nil
     local lastSprinklerAt = 0
-
-    Engine.idle = { last = tick(), at = 0, vim = nil, vu = nil }
-    pcall(function() Engine.idle.vim = game:GetService("VirtualInputManager") end)
-    pcall(function() Engine.idle.vu = game:GetService("VirtualUser") end)
-
-    function Engine.idleNudge()
-        local idle = Engine.idle
-        local now = tick()
-        if now - idle.at < 4 then return false end
-        idle.at = now
-        local sent = false
-        if idle.vu then
-            sent = pcall(function()
-                idle.vu:CaptureController()
-                idle.vu:ClickButton2(Vector2.new(4, 4))
-            end)
-        end
-        if (not sent) and idle.vim then
-            sent = pcall(function()
-                idle.vim:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
-                task.wait(0.03)
-                idle.vim:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
-            end)
-        end
-        if not sent then
-            sent = pcall(function()
-                keypress(0x10)
-                task.wait(0.03)
-                keyrelease(0x10)
-            end)
-        end
-        idle.last = now
-        return sent == true
-    end
-
-    do
-        pcall(function()
-            lp.Idled:Connect(function()
-                Engine.idleNudge()
-            end)
-        end)
-
-        bg(function()
-            while true do
-                task.wait(5)
-                pcall(function()
-                    if S.hard_off then return end
-                    if not Engine.anyFeatureOn() then return end
-                    local quiet = tick() - Engine.idle.last
-                    if quiet < 150 then return end
-                    Engine.idleNudge()
-                    if Engine.consolePush then
-                        Engine.consolePush("Anti-idle: no input for " .. tostring(floor(quiet)) .. "s")
-                    end
-                end)
-            end
-        end)
-    end
 
     
     
@@ -7785,24 +7726,35 @@ end)()
         return true
     end
 
+     
+     
+     
+     
+    Nav.cap = function(name)
+        local caps = _G.__LOLCAT_CAP
+        if type(caps) ~= "table" then return nil end
+        local fn = caps[name]
+        if type(fn) == "function" then return fn end
+        return nil
+    end
+
     Nav.firePromptOn = function(obj)
-        if not obj or type(fireproximityprompt) ~= "function" then return false end
+        local fire = Nav.cap("prompt")
+        if not obj or not fire then return false end
         local ok, desc = pcall(function() return obj:GetDescendants() end)
         if not ok or not desc then return false end
         for _, o in ipairs(desc) do
             if o.ClassName == "ProximityPrompt" then
                 local enabled = try(function() return o.Enabled end)
-                if enabled ~= false then
-                    local fired = pcall(function() fireproximityprompt(o) end)
-                    if fired then return true end
-                end
+                if enabled ~= false and pcall(fire, o) then return true end
             end
         end
         return false
     end
 
     Nav.firePromptNear = function(pos, radius)
-        if not pos or type(fireproximityprompt) ~= "function" then return false end
+        local fire = Nav.cap("prompt")
+        if not pos or not fire then return false end
         local ok, list = pcall(function() return Workspace:GetDescendants() end)
         if not ok or not list then return false end
         local best, bestD = nil, radius or 18
@@ -7817,25 +7769,37 @@ end)()
             end
         end
         if best then
-            pcall(function() fireproximityprompt(best) end)
+            pcall(fire, best)
             return true
         end
         return false
     end
 
+     
+     
+     
+     
     Nav.touchToken = function(tok)
-        if not tok or type(firetouchinterest) ~= "function" then return false end
+        if not tok then return false end
         local part = tok
         if not getPartPos(part) then
             part = try(function() return tok:FindFirstChildWhichIsA("BasePart", true) end)
         end
+        local target = getPartPos(part)
         local hrp = getHRP()
-        if not hrp or not part or not getPartPos(part) then return false end
-        local ok = pcall(function()
-            firetouchinterest(hrp, part, 0)
-            firetouchinterest(hrp, part, 1)
-        end)
-        return ok
+        if not hrp or not target then return false end
+        local touch = Nav.cap("touch")
+        if touch then return pcall(touch, hrp, part) end
+         
+         
+         
+        local dx, dz = target.X - hrp.Position.X, target.Z - hrp.Position.Z
+        if math.sqrt(dx * dx + dz * dz) > 4 then return false end
+        local now = tick()
+        if now - (Nav._touchNudgeAt or 0) < 0.45 then return false end
+        Nav._touchNudgeAt = now
+        Nav.walk(Vector3.new(target.X, target.Y, target.Z), { arrive = 1.5, timeout = 1.2 })
+        return true
     end
 
     Nav.hiveKeyAt = function(pos)
@@ -7894,7 +7858,6 @@ end)()
         if want and not held then
             Nav.walkKeys[code] = true
             pcall(function() keypress(code) end)
-            Engine.idle.last = tick()
         elseif not want and held then
             Nav.walkKeys[code] = nil
             pcall(function() keyrelease(code) end)
@@ -9532,30 +9495,7 @@ end)()
                 end
             end)
         end
-        Engine.idle.last = tick()
         S.dig.clicks = (S.dig.clicks or 0) + 1
-    end
-
-    S.dig.clickClient = function(pt)
-        local cx, cy = floor(pt.X), floor(pt.Y)
-        local idle = Engine.idle
-        local sent = false
-        if idle.vu then
-            sent = pcall(function()
-                idle.vu:CaptureController()
-                idle.vu:ClickButton1(Vector2.new(cx, cy))
-            end)
-        end
-        if (not sent) and idle.vim then
-            sent = pcall(function()
-                idle.vim:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-                task.wait(0.02)
-                idle.vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-            end)
-        end
-        idle.last = tick()
-        S.dig.clicks = (S.dig.clicks or 0) + 1
-        return sent == true
     end
 
     local function autoDigCursorFree()
@@ -9577,8 +9517,7 @@ end)()
          
          
          
-        if S.dig.uiOpen then return end
-        local focused = rbxActive()
+        if S.dig.uiOpen or not rbxActive() then return end
 
         local char = lp and lp.Character
         if not char then return end
@@ -9617,11 +9556,7 @@ end)()
          
          
         if tool then pcall(function() tool:Activate() end) end
-        if focused then
-            S.dig.click(S.dig.clickPoint())
-        else
-            S.dig.clickClient(S.dig.clickPoint())
-        end
+        S.dig.click(S.dig.clickPoint())
     end
 
     
@@ -9998,26 +9933,20 @@ end)()
 
     local function fireRemote(ev, arg)
         if not ev then return false end
-        local ok
-        if ev.ClassName == "RemoteFunction" then
-            ok = pcall(function() ev:InvokeServer(arg) end)
-        elseif arg ~= nil then
-            ok = pcall(function() ev:FireServer(arg) end)
-        else
-            ok = pcall(function() ev:FireServer() end)
-        end
-        return ok
+        local caps = _G.__LOLCAT_CAP
+        if type(caps) ~= "table" then return false end
+        local fn
+        if ev.ClassName == "RemoteFunction" then fn = caps.invoke else fn = caps.send end
+        if type(fn) ~= "function" then return false end
+        return pcall(fn, ev, arg)
     end
 
     local function fireRemoteConfirm(ev, arg)
         if not ev then return false end
-        local ok
-        if ev.ClassName == "RemoteFunction" then
-            ok = pcall(function() ev:InvokeServer(arg, true) end)
-        else
-            ok = pcall(function() ev:FireServer(arg, true) end)
-        end
-        return ok
+        local caps = _G.__LOLCAT_CAP
+        local fn = type(caps) == "table" and caps.sendConfirm or nil
+        if type(fn) ~= "function" then return false end
+        return pcall(fn, ev, arg)
     end
 
      
@@ -10465,38 +10394,20 @@ end)()
         local cached = Nav._planterIds
         if not force and cached and (nowIds - (Nav._planterIdsAt or 0)) < 180 then return cached end
         if Nav._planterIdsBusy then return cached or {} end
-        if type(getgc) ~= "function" or type(readtbl) ~= "function" then return cached or {} end
+        local caps = _G.__LOLCAT_CAP
+        local scan = type(caps) == "table" and caps.planterIds or nil
+         
+         
+         
+        if type(scan) ~= "function" then
+            Nav._planterIdsAt = nowIds
+            return cached or {}
+        end
 
         Nav._planterIdsBusy = true
         Nav._planterIdsAt = nowIds
-        local out = {}
-        pcall(function()
-            for index, entry in ipairs(getgc("ActorID")) do
-                 
-                 
-                if index % 8 == 0 then task.wait() end
-                if entry.type == "number" and (tonumber(entry.value) or -1) > 0 then
-                    local info = { id = tonumber(entry.value) }
-                    for offset = -640, 640, 32 do
-                        local okR, rows = pcall(readtbl, entry.tbl + offset, 1)
-                        if okR and type(rows) == "table" and type(rows[1]) == "table" then
-                            local item = rows[1]
-                            local key = item.key ~= nil and tostring(item.key) or nil
-                            if key == "Type" then
-                                info.type = tostring(item.value)
-                            elseif key == "GrowthPercent" then
-                                info.growth = tonumber(item.value)
-                            elseif key == "IsMine" then
-                                info.mine = item.value == true
-                            elseif key == "Gui" then
-                                info.gui = item.value ~= nil
-                            end
-                        end
-                    end
-                    if info.mine or info.gui then out[#out + 1] = info end
-                end
-            end
-        end)
+        local okScan, out = pcall(scan)
+        if not okScan or type(out) ~= "table" then out = {} end
         Nav._planterIds, Nav._planterIdsAt, Nav._planterIdsBusy = out, nowIds, false
         return out
     end
@@ -11015,7 +10926,7 @@ end)()
 
         local function fire()
             local before = sprinklerSnapshot()
-            local ok = pcall(function() cmd:FireServer({ Name = "Sprinkler Builder" }) end)
+            local ok = fireRemote(cmd, { Name = "Sprinkler Builder" })
             if not ok then return false end
             local dl = tick() + 1.8
             while tick() < dl do
@@ -11116,7 +11027,6 @@ end)()
         if want and not walkKeysHeld[code] then
             walkKeysHeld[code] = true
             pcall(function() keypress(code) end)
-            Engine.idle.last = tick()
         elseif not want and walkKeysHeld[code] then
             walkKeysHeld[code] = nil
             pcall(function() keyrelease(code) end)
@@ -12059,40 +11969,23 @@ end)()
     end
 
      
-    Nav.offFails = 0
-
-    Nav.switchToKeyboard = function(reason)
-        if S.walk_method == "Keyboard" then return end
-        S.walk_method = "Keyboard"
-        if type(reason) == "string" then status = reason end
-        pcall(function()
-            local sync = _G and _G.__lolcatWalkMethodSync
-            if type(sync) == "function" then sync("Keyboard") end
-        end)
-    end
-
     Nav.walk = function(targetPos, opts)
         if not targetPos then return false end
         opts = opts or {}
         if S.walk_method == "Keyboard" then
             return walkWithKeys(targetPos, opts) == true
         end
-        if memReady() and Nav.memWalkTo(targetPos, opts) then
-            Nav.offFails = 0
-            return true
-        end
-        if not isAlive() or not isOn() then return false end
-         
-         
-        Nav.offFails = (Nav.offFails or 0) + 1
-        local why = nil
+        if Nav.memWalkTo(targetPos, opts) then return true end
         if not memReady() then
-            why = "Offsets unavailable, using keyboard"
-        elseif Nav.offFails >= 3 then
-            why = "Offsets walk failing, using keyboard"
-        end
-        if why then
-            Nav.switchToKeyboard(why)
+             
+             
+            status = "Offsets unavailable, using keyboard"
+            S.walk_method = "Keyboard"
+            pcall(function()
+                local sync = _G and _G.__lolcatWalkMethodSync
+
+                if type(sync) == "function" then sync("Keyboard") end
+            end)
             return walkWithKeys(targetPos, opts) == true
         end
         return false
@@ -14140,29 +14033,6 @@ end
      
      
      
-    Nav.tapKey = function(vk, key)
-        local idle = Engine.idle
-        if rbxActive() then
-            local ok = pcall(function()
-                keypress(vk)
-                task.wait(0.12)
-                keyrelease(vk)
-            end)
-            idle.last = tick()
-            if ok then return true end
-        end
-        if idle.vim and key then
-            local ok = pcall(function()
-                idle.vim:SendKeyEvent(true, key, false, game)
-                task.wait(0.12)
-                idle.vim:SendKeyEvent(false, key, false, game)
-            end)
-            idle.last = tick()
-            return ok
-        end
-        return false
-    end
-
     local Watch = {
         fails = 0, resets = 0, lastReset = 0,
         lastPos = nil, stillSince = nil, onReset = nil,
@@ -14203,10 +14073,9 @@ end
      
      
     Watch.reset = function(what, force)
-        if Watch.busy and (tick() - (Watch.busyAt or 0)) < 90 then return false end
+        if Watch.busy then return false end
         if not force and tick() - Watch.lastReset < 25 then return false end
         Watch.busy = true
-        Watch.busyAt = tick()
         Watch.lastReset = tick()
         Watch.fails = 0
         Watch.resets = Watch.resets + 1
@@ -14244,30 +14113,13 @@ end
              
              
             pcall(function()
-                local c = lp.Character
-                if not c then return end
-                local h = c:FindFirstChildOfClass("Humanoid")
-                if h then
-                    pcall(function() h:TakeDamage((h.MaxHealth or 100) * 4) end)
-                    pcall(function() h:ChangeState(Enum.HumanoidStateType.Dead) end)
-                end
-                pcall(function() c:BreakJoints() end)
-            end)
-            task.wait(0.9)
-            pcall(function()
-                local c = lp.Character
-                local h = c and c:FindFirstChildOfClass("Humanoid")
-                died = (h == nil) or (h.Health <= 0) or (c ~= oldChar)
-            end)
-        end
-        if not died then
-            pcall(function()
-                if rbxActive() and type(setrobloxinput) == "function" then setrobloxinput(true) end
-                Nav.tapKey(0x1B, Enum.KeyCode.Escape)
+                if not rbxActive() then return end
+                setrobloxinput(true)
+                keypress(0x1B); task.wait(0.12); keyrelease(0x1B)
                 task.wait(0.55)
-                Nav.tapKey(0x52, Enum.KeyCode.R)
+                keypress(0x52); task.wait(0.12); keyrelease(0x52)
                 task.wait(0.55)
-                Nav.tapKey(0x0D, Enum.KeyCode.Return)
+                keypress(0x0D); task.wait(0.12); keyrelease(0x0D)
             end)
         end
 
@@ -14284,13 +14136,8 @@ end
         Watch.lastPos = nil
         Watch.stillSince = nil
         if type(Watch.onReset) == "function" then pcall(Watch.onReset) end
-        if isAlive() then
-            status = "Watchdog: back at hive, retrying"
-        else
-            status = "Watchdog: respawning"
-            pcall(function() if Nav.respawnClick then Nav.respawnClick() end end)
-        end
         Watch.busy = false
+        status = "Watchdog: back at hive, retrying"
         return true
     end
 
@@ -14368,7 +14215,7 @@ end
              
             status = "Tunnel Bear: activating"
             Nav.walk(activatePos, { arrive = 3.5, timeout = 30, label = "Tunnel Bear activate" })
-            pcall(function() Nav.firePromptNear(activatePos, 22) end)
+            Nav.usePromptAt(activatePos, 22)
             task.wait(0.4)
             local tWait = tick()
             while isOn() and tick() - tWait < 6 do
@@ -14505,18 +14352,18 @@ end
             pcall(function()
                 local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
                 local toy = events and events:FindFirstChild("ToyEvent")
-                if toy then toy:FireServer("Tunnel Portal") end
+                if toy then fireRemote(toy, "Tunnel Portal") end
             end)
         else
              
              
-            local padPos, padPart = portalPos, nil
+            local padPos = portalPos
             pcall(function()
                 local toys = Workspace:FindFirstChild("Toys")
                 local model = toys and toys:FindFirstChild("Tunnel Portal")
                 local platform = model and (model:FindFirstChild("Platform") or model.PrimaryPart)
                 local p = platform and platform.Position
-                if p then padPos, padPart = p, platform end
+                if p then padPos = p end
             end)
             Nav.walk(Vector3.new(padPos.X, padPos.Y + 3, padPos.Z), {
                 arrive = 3, timeout = 40, label = "Tunnel exit pad",
@@ -14531,12 +14378,6 @@ end
                     - Vector3.new(padPos.X, padPos.Y, padPos.Z)).Magnitude <= 4
                 if near then
                     pcall(function() Nav.firePromptNear(padPos, 24) end)
-                    pcall(function()
-                        if padPart and type(firetouchinterest) == "function" then
-                            firetouchinterest(hrp4, padPart, 0)
-                            firetouchinterest(hrp4, padPart, 1)
-                        end
-                    end)
                     pcall(function() keypress(0x45) end)
                     task.wait(0.12)
                     pcall(function() keyrelease(0x45) end)
@@ -14870,7 +14711,7 @@ end
                  
                  
                 Nav.walk(Vector3.new(best.X, best.Y + 1, best.Z), {
-                    arrive = 5, timeout = 4, label = "Crab loot",
+                    arrive = 3, timeout = 4, label = "Crab loot",
                 })
             end
         end
@@ -15292,10 +15133,11 @@ end
             end
             Nav.firePromptOn(hive)
             Nav.firePromptNear(anchor, 18)
-            pcall(function()
+            local click = Nav.cap("click")
+            if click then
                 local cd = hive:FindFirstChildWhichIsA("ClickDetector", true)
-                if cd then fireclickdetector(cd) end
-            end)
+                if cd then pcall(click, cd) end
+            end
             pcall(function()
                 keypress(0x45)
                 task.wait(0.06)
@@ -15343,14 +15185,10 @@ end
         if S.hybrid then
             if making and not force then return true end
             local ev = getRemote("PlayerHiveCommand")
-            local fired = false
-            if ev then
-                fired = pcall(function() ev:FireServer("ToggleHoneyMaking") end)
-            end
+            local fired = fireRemote(ev, "ToggleHoneyMaking")
             if not fired then
-                fired = pcall(function()
-                    RS.Events.PlayerHiveCommand:FireServer("ToggleHoneyMaking")
-                end)
+                local direct = try(function() return RS.Events.PlayerHiveCommand end)
+                fired = fireRemote(direct, "ToggleHoneyMaking")
             end
              
              
@@ -15376,45 +15214,6 @@ end
             keyrelease(0x45)
         end)
         return true
-    end
-
-    Nav.hiveTravel = function(target, label, tries)
-        if not target then return false end
-        label = label or "Hive travel"
-        tries = tonumber(tries) or 4
-        local useKeys = false
-        for attempt = 1, tries do
-            if not isOn() then return false end
-            local hrp = getHRP()
-            if not hrp then
-                task.wait(0.6)
-            else
-                local gap = (target - hrp.Position).Magnitude
-                if gap <= 5 then return true end
-                status = label .. " " .. attempt .. "/" .. tries
-                if useKeys then
-                    pcall(function()
-                        if type(Nav._walkKeysImpl) == "function" then
-                            Nav._walkKeysImpl(target, { arrive = 5, timeout = 22 })
-                        end
-                    end)
-                elseif S.travel_mode == "Tween" then
-                    pcall(function() Nav.tweenTravel(target, S.glide_speed, 4, label) end)
-                else
-                    Nav.walk(target, {
-                        arrive = 4,
-                        timeout = math.max(12, math.min(35, gap / 4 + 8)),
-                        label = label,
-                    })
-                end
-                local nowHrp = getHRP()
-                if nowHrp and (nowHrp.Position - target).Magnitude <= 6 then return true end
-            end
-            if attempt >= 2 then useKeys = true end
-            Engine.idleNudge()
-            task.wait(0.4)
-        end
-        return false
     end
 
     local function convertAtHive()
@@ -15451,9 +15250,7 @@ end
          
          
         local target = nil
-        local arrived = false
         for attempt = 1, 3 do
-            if not isOn() then return end
             if not pp then
                 autoDetectHiveInstant()
                 pad = myHive and HiveTool.pad(myHive)
@@ -15461,26 +15258,14 @@ end
             end
             if not pp then break end
             target = Vector3.new(pp.X, HiveTool.top(pad) + 1, pp.Z)
-            if Nav.hiveTravel(target, "Hive travel", 4) then arrived = true; break end
+            Nav.go(target, S.glide_speed, 3, "Hive travel")
+            local hrp = getHRP()
+            if hrp and (hrp.Position - target).Magnitude <= 5 then break end
             autoDetectHiveInstant()
             pad = myHive and HiveTool.pad(myHive)
             pp = padPos(pad)
-            task.wait(0.5)
         end
         if not pp or not target then task.wait(1); needSprinkler = true; return end
-        if not arrived then
-            local hrp = getHRP()
-            local closeEnough = hrp ~= nil and (hrp.Position - target).Magnitude <= 45
-            local onPrompt = string.find(Nav.hivePromptText(), "Honey", 1, true) ~= nil
-            if closeEnough or onPrompt then arrived = true end
-        end
-        if not arrived then
-            S.dig.convCooldown = tick() + 60
-            needSprinkler = true
-            status = "Hive unreachable - retry in 60s"
-            Watch.fail("hive travel")
-            return
-        end
 
          
          
@@ -15683,66 +15468,6 @@ end
                 Watch.tick(collecting == true and S.dig.converting == false and S.farm_on == true)
             end)
             task.wait(1)
-        end
-    end)
-
-    Nav.respawnClick = function()
-        local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
-        if not pg then return false end
-        local ok, list = pcall(function() return pg:GetDescendants() end)
-        if not ok or type(list) ~= "table" then return false end
-        for i = 1, #list do
-            local obj = list[i]
-            if obj.ClassName == "TextButton" then
-                local visible = try(function() return obj.Visible end)
-                local txt = string.lower(safeText(obj))
-                if visible ~= false and txt ~= "" and string.find(txt, "respawn", 1, true) then
-                    local ap = try(function() return obj.AbsolutePosition end)
-                    local as = try(function() return obj.AbsoluteSize end)
-                    if ap and as and as.X > 4 and as.Y > 4 then
-                        pcall(function() obj.Activated:Fire() end)
-                        pcall(function()
-                            local cx = floor(ap.X + as.X / 2)
-                            local cy = floor(ap.Y + as.Y / 2)
-                            if type(mousemoveabs) == "function" then mousemoveabs(cx, cy) end
-                            if type(mouse1click) == "function" then mouse1click(cx, cy) end
-                        end)
-                        Engine.idle.last = tick()
-                        return true
-                    end
-                end
-            end
-        end
-        return false
-    end
-
-    bg(function()
-        local deadSince, lastTry = nil, 0
-        while true do
-            task.wait(1)
-            pcall(function()
-                if S.hard_off or not Engine.anyFeatureOn() or not FeaturesActive then
-                    deadSince = nil
-                    return
-                end
-                if Watch.busy then return end
-                if isAlive() then
-                    deadSince = nil
-                    return
-                end
-                local now = tick()
-                deadSince = deadSince or now
-                if now - deadSince < 3 then return end
-                if now - lastTry < 4 then return end
-                lastTry = now
-                status = "Respawning"
-                if Nav.respawnClick() then return end
-                Nav.tapKey(0x1B, Enum.KeyCode.Escape)
-                task.wait(0.5)
-                Nav.tapKey(0x52, Enum.KeyCode.R)
-                task.wait(0.5)
-                Nav.tapKey(0x0D, Enum.KeyCode.Return)
-            end)
         end
     end)
 
